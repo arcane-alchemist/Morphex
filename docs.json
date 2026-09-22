@@ -1,0 +1,62 @@
+{
+  "theme": "aspen",
+  "name": "Morphex",
+  "colors": {
+    "primary": "#00E5FF",
+    "light": "#5EEFFF",
+    "dark": "#00B8D4"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "index",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/overview",
+          "architecture/transaction-flow",
+          "architecture/relayer-bridge"
+        ]
+      },
+      {
+        "group": "Core Concepts",
+        "pages": [
+          "concepts/fhevm-execution-model",
+          "concepts/encrypted-types",
+          "concepts/acl-and-composability",
+          "concepts/fhe-select-vs-require",
+          "concepts/no-encrypted-division"
+        ]
+      },
+      {
+        "group": "Deployment",
+        "pages": [
+          "deployment/networks",
+          "deployment/environment",
+          "deployment/scripts"
+        ]
+      },
+      {
+        "group": "Contract Reference",
+        "pages": [
+          "reference/morphex-token",
+          "reference/confidential-pair",
+          "reference/confidential-pair-factory",
+          "reference/relayer-vault",
+          "reference/mock-erc20"
+        ]
+      },
+      {
+        "group": "Operations",
+        "pages": [
+          "reference/relayer-service-spec"
+        ]
+      }
+    ]
+  }
+}

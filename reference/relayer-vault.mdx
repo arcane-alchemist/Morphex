@@ -1,0 +1,243 @@
+---
+title: "RelayerVault: Public Custody and Withdrawal Bridge"
+sidebarTitle: "RelayerVault"
+description: "Reference for RelayerVault, the public custody contract that holds ERC-20 deposits and pays batched withdrawals with a time-locked escape hatch."
+---
+
+`RelayerVault` is a public, custodial ERC-20 vault that backs the confidential token bridge. It records public deposits, registers user-initiated withdrawal requests, and pays them out in batches signed by the relayer. If the relayer fails to fulfill a request within `ESCAPE_HATCH_DELAY`, the user can claim the funds directly.
+
+<Warning>
+  This is intentionally a custodial, pooled design. The relayer may batch and net public payouts off-chain. Users trust the relayer to act honestly and promptly, or use the escape hatch after `ESCAPE_HATCH_DELAY`. This is not a trustless or cryptographically private design; it is a controlled public ledger for a semi-trusted relayer service.
+</Warning>
+
+## Overview
+
+```solidity
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/// @title RelayerVault
+/// @notice Minimal custody vault for pooled stablecoin deposits and batched relayer payouts.
+contract RelayerVault is ReentrancyGuard, AccessControl { ... }
+```
+
+## Constants and roles
+
+```solidity
+bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
+```
+
+- `DEFAULT_ADMIN_ROLE`: Rotates the relayer signer.
+- `RELAYER_ROLE`: Authorizes `batchWithdraw`.
+
+## Constructor
+
+```solidity
+constructor(address admin, address initialRelayer, uint256 escapeHatchDelay_);
+```
+
+<ParamField path="admin" type="address">
+  Address that receives `DEFAULT_ADMIN_ROLE`. Should be a multisig in production.
+</ParamField>
+
+<ParamField path="initialRelayer" type="address">
+  Address that receives `RELAYER_ROLE` and becomes the initial `relayerSigner`.
+</ParamField>
+
+<ParamField path="escapeHatchDelay_" type="uint256">
+  Seconds a user must wait after a withdrawal request before they can claim funds directly. Must be non-zero. Stored as `ESCAPE_HATCH_DELAY` (immutable).
+</ParamField>
+
+Reverts if any address is zero (`"RelayerVault: zero admin"`, `"RelayerVault: zero relayer"`) or if the delay is zero (`"RelayerVault: invalid delay"`).
+
+The default deploy uses `86400` seconds (1 day).
+
+## State
+
+```solidity
+address public relayerSigner;
+uint256 public immutable ESCAPE_HATCH_DELAY;
+uint256 public nextRequestId;
+
+struct WithdrawalRequest {
+    address user;
+    address recipient;
+    address token;
+    uint256 amount;
+    uint256 requestedAt;
+    bool fulfilled;
+    bool escaped;
+}
+
+struct Payout {
+    address recipient;
+    address token;
+    uint256 amount;
+}
+
+mapping(uint256 => WithdrawalRequest) public withdrawalRequests;
+```
+
+## Events
+
+```solidity
+event Deposited(address indexed user, address indexed token, uint256 amount, uint256 timestamp);
+event Withdrawn(address indexed recipient, address indexed token, uint256 amount, uint256 timestamp);
+event WithdrawalRequested(
+    address indexed user,
+    uint256 indexed requestId,
+    address indexed token,
+    address recipient,
+    uint256 amount,
+    uint256 requestedAt
+);
+event EscapeHatchClaimed(
+    uint256 indexed requestId,
+    address indexed user,
+    address indexed token,
+    uint256 amount,
+    uint256 timestamp
+);
+```
+
+## Administration
+
+### setRelayer
+
+```solidity
+/// @notice Grants relayer authority to the configured signer or multisig-controlled service.
+function setRelayer(address relayer) external onlyRole(DEFAULT_ADMIN_ROLE);
+```
+
+Rotates the relayer role. Revokes `RELAYER_ROLE` from the previous signer, grants it to `relayer`, and updates `relayerSigner`. Reverts on the zero address.
+
+### setRelayerSigner
+
+```solidity
+/// @notice Alias used by local tests for signer rotation. Production should prefer a multisig-admin-controlled rotation flow.
+function setRelayerSigner(address relayer) external onlyRole(DEFAULT_ADMIN_ROLE);
+```
+
+Alias for `setRelayer` used by the local test suite.
+
+## Deposits
+
+### deposit
+
+```solidity
+/// @notice Deposits public stablecoin into the vault. This is intentionally not amount-hiding.
+function deposit(address token, uint256 amount) external nonReentrant;
+```
+
+Pulls `amount` of `token` from `msg.sender` via `SafeERC20.safeTransferFrom` and emits `Deposited(msg.sender, token, amount, block.timestamp)`. Reverts on zero token or zero amount.
+
+Deposits are public. The bridge relies on the relayer observing this event and calling `MorphexToken.relayerMint` to credit the depositor with confidential tokens off-chain.
+
+## Withdrawal registration
+
+### registerWithdrawalRequest
+
+```solidity
+/// @notice Registers a user intent to withdraw public funds to their own address. Called from the confidential burn bridge.
+function registerWithdrawalRequest(address user, address token, uint256 amount)
+    external nonReentrant returns (uint256 requestId);
+```
+
+Called by `MorphexToken.relayerBurnRequest` after burning a user's confidential balance. Registers a withdrawal to the user's own address.
+
+### registerWithdrawalRequestTo
+
+```solidity
+/// @notice Registers a user intent to withdraw public funds to a different recipient. Called from the confidential burn bridge.
+function registerWithdrawalRequestTo(address user, address recipient, address token, uint256 amount)
+    external nonReentrant returns (uint256 requestId);
+```
+
+Same as `registerWithdrawalRequest`, but the payout goes to `recipient` instead of `user`.
+
+Both variants:
+
+- Require non-zero `user`, `recipient`, `token`, and `amount`.
+- Increment `nextRequestId` and store the full `WithdrawalRequest`.
+- Emit `WithdrawalRequested(user, requestId, token, recipient, amount, block.timestamp)`.
+
+<Note>
+  These functions have no access-control modifier because they are meant to be called only through `MorphexToken`, which is the only caller path that can legitimately register a withdrawal after burning confidential balance. Off-chain solvency accounting must include this.
+</Note>
+
+## Payouts
+
+### batchWithdraw
+
+```solidity
+/// @notice Pays out a batch of withdrawals in one transaction, authorized by the relayer role.
+function batchWithdraw(Payout[] calldata payouts, uint256[] calldata requestIds)
+    external nonReentrant onlyRole(RELAYER_ROLE);
+```
+
+Pays out one or more withdrawals in a single transaction. For each payout:
+
+- Requires non-zero `recipient`, `token`, and `amount`.
+- If the paired `requestIds[i]` is non-zero, looks up the request and enforces:
+  - The request exists (`user != address(0)`).
+  - `!fulfilled`.
+  - `payout.recipient == request.recipient`.
+  - `payout.token == request.token`.
+  - `payout.amount == request.amount`.
+  - Marks the request `fulfilled = true`, `escaped = false`.
+- Executes `SafeERC20.safeTransfer(payout.token, payout.recipient, payout.amount)`.
+- Emits `Withdrawn(payout.recipient, payout.token, payout.amount, block.timestamp)`.
+
+Passing a zero `requestId` skips the reconciliation and simply pays the recipient. This lets the relayer net multiple requests off-chain, as long as the total public flow is correct.
+
+### claimEscapedWithdrawal
+
+```solidity
+/// @notice Allows the user to bypass the relayer after the configured delay if it has not yet paid out.
+function claimEscapedWithdrawal(uint256 requestId) external nonReentrant;
+```
+
+User-initiated escape after `ESCAPE_HATCH_DELAY` has elapsed. Requires:
+
+- Request exists.
+- `msg.sender == request.user`.
+- `!request.fulfilled`.
+- `block.timestamp >= request.requestedAt + ESCAPE_HATCH_DELAY`.
+
+Marks `fulfilled = true`, `escaped = true`, pays `request.recipient`, and emits both `EscapeHatchClaimed` and `Withdrawn`.
+
+## View helpers
+
+### reserves
+
+```solidity
+/// @notice Returns the vault's public balance for a given token as a solvency signal for off-chain tooling.
+function reserves(address token) external view returns (uint256);
+```
+
+Returns the vault's current `IERC20(token).balanceOf(address(this))`. Off-chain tooling uses this to monitor solvency against outstanding confidential supply.
+
+### getWithdrawalRequest
+
+```solidity
+/// @notice Gets a request record for off-chain observability or direct user claim checks.
+function getWithdrawalRequest(uint256 requestId)
+    external view
+    returns (
+        address user,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 requestedAt,
+        bool fulfilled,
+        bool escaped
+    );
+```
+
+Returns the stored request tuple. Useful for the frontend to check whether a burn-triggered withdrawal has been fulfilled yet.
+
+<Note>
+  RelayerVault is unaudited and intended for testnet use only.
+</Note>

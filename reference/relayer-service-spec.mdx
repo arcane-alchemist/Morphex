@@ -1,0 +1,146 @@
+---
+title: "Relayer Service Specification and Operating Model"
+sidebarTitle: "Relayer Spec"
+description: "Ledger schema, batching policy, monitoring, key management, and non-goals for the off-chain relayer service that operates the Morphex vault bridge."
+---
+
+This document describes the off-chain relayer service that supports the custodial pooled design for Morphex stablecoin deposits and confidential withdrawals. It is deliberately a service specification only; no production backend implementation is included here.
+
+## Trust model
+
+The relayer is the single point of honesty-trust in this design. It accepts public stablecoin deposits into the vault, mints confidential ERC-7984 tokens to users, and later processes withdrawal requests by paying out from the vault. Users are expected to trust the relayer to process honestly and promptly, or to fall back to the escape hatch after the configured delay.
+
+This is not a trustless or cryptographic unlinkability design. It is a deliberate custodial pooled model chosen to preserve usability while keeping the AMM confidential on-chain.
+
+## Ledger schema
+
+The relayer must maintain an internal ledger with at least the following records.
+
+### User ledger
+
+- `user_id` / wallet address
+- `created_at`
+- `last_seen_at`
+- `status` (active, restricted, flagged)
+
+### Public deposit ledger
+
+- `deposit_id`
+- `user_address`
+- `token_address`
+- `amount`
+- `tx_hash`
+- `block_number`
+- `timestamp`
+- `confirmed` / `settled`
+- `linked_confidential_mint_id` (nullable)
+
+### Confidential mint ledger
+
+- `mint_id`
+- `user_address`
+- `token_address` (for example, `cUSDT`)
+- `encrypted_amount_handle` or encrypted payload reference
+- `public_amount` (plaintext amount used for relayer reconciliation)
+- `deposit_id`
+- `mint_tx_hash`
+- `timestamp`
+- `status` (pending, confirmed, failed)
+
+### Withdrawal request ledger
+
+- `request_id`
+- `user_address`
+- `token_address`
+- `requested_amount`
+- `burn_tx_hash`
+- `recorded_at`
+- `fulfilled` (bool)
+- `fulfilled_by` (relayer or escape_hatch)
+- `payout_tx_hash` (nullable)
+- `escape_hatch_deadline`
+- `status` (pending, in_batch, paid, escaped, rejected)
+
+### Batch payout ledger
+
+- `batch_id`
+- `created_at`
+- `payout_count`
+- `total_amount`
+- `recipient_set_hash`
+- `tx_hash`
+- `status` (queued, submitted, mined, failed)
+
+### Vault reconciliation ledger
+
+- `token_address`
+- `vault_balance_onchain`
+- `sum_of_pending_deposits`
+- `sum_of_paid_out_amounts`
+- `sum_of_confidential_supply`
+- `last_reconciled_at`
+- `reconciliation_status`
+
+## Netting and batching policy
+
+The relayer should batch payouts periodically, rather than paying immediately per withdrawal request.
+
+Recommended default policy:
+
+- batch interval: hourly
+- minimum payout threshold: for example 10 to 50 stablecoin units, or a configurable minimum value for a token
+- max batch size: set by gas budget and payout count limit
+- payout ordering: shuffle or pseudo-randomize recipient ordering before submission to reduce obvious correlation with a specific deposit flow
+- payout mix: combine multiple request amounts into one transaction while still preserving per-user reconciliation records
+- negative-balance check: never submit a payment larger than the vault's current on-chain balance minus a safety buffer
+
+The relayer should compute a per-token net position for each user and aggregate across the batch window, but it should not claim cryptographic unlinkability. The internal ledger remains the actual source of truth and the primary honesty anchor.
+
+## Monitoring requirements
+
+The operator must monitor at minimum:
+
+- vault token balance against the total confirmed confidential supply for each token
+- pending withdrawal requests nearing their escape-hatch deadline
+- time since last successful batch payout
+- signer health and multisig status
+- relayer service uptime / queue backlog
+- mismatches between public deposits and minted confidential amounts
+- any unexpected spike in large withdrawals or known user churn patterns
+
+The relayer should emit alerts when:
+
+- vault balance drops below a configured floor
+- a pending request is within a few hours of the escape-hatch threshold
+- the relayer signer key is near expiry or not controlled by the expected multisig policy
+- batch payout submission fails or is delayed
+
+## Key management requirements
+
+- Use a multisig-controlled relayer signer or threshold-signing setup rather than a single EOA.
+- The relayer service should maintain a hot wallet for batching and a cold wallet for key protection.
+- Every key rotation must be accompanied by a documented transition plan and a vault role update.
+- Operator access should be logged and auditable, with emergency pause or signer rotation procedures defined in advance.
+
+## Explicit non-goals
+
+This design does not provide:
+
+- trustless user privacy against the relayer
+- cryptographic unlinkability between deposits and withdrawals
+- true proof of reserves enforcement on-chain
+- a shielded-pool alternative or ZK-based privacy guarantee
+
+A ZK shielded-pool would provide stronger privacy guarantees but is materially larger in scope and not part of this task.
+
+## Operational notes
+
+The off-chain relayer is responsible for:
+
+- listening to `Deposited` events from `RelayerVault`
+- issuing `relayerMint` calls only after confirming the deposit and updating the internal ledger
+- listening for `BurnRequested` and `WithdrawalRequested` events from the confidential token and vault
+- batching payouts while preserving a ledger of exact payment obligations
+- confirming whether escape-hatch claims are due and whether any request is stale
+
+The internal ledger is the only place that turns the public vault actions into a coherent user-by-user obligation chain.

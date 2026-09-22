@@ -1,0 +1,103 @@
+---
+title: "quickstart"
+sidebarTitle: "Quickstart"
+description: "Clone Morphex, compile contracts, run 21 fhEVM tests, deploy locally with mock tokens, seed a wallet, and launch the frontend in under 10 minutes."
+---
+
+This guide gets you running Morphex on a local Hardhat node with mock tokens and a working frontend. You will compile the Solidity contracts, run the full test suite in fhEVM mock mode, deploy the protocol locally, seed a wallet with test balances, and open the React frontend.
+
+## Prerequisites
+
+- Node.js >= 20.0.0
+- npm or a compatible package manager
+- Git
+- A browser wallet such as MetaMask
+
+## Step by step
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/arcane-alchemist/Morphex.git
+    cd Morphex
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    Install root dependencies and then frontend dependencies.
+
+    <CodeGroup>
+
+    ```bash Root
+    npm install
+    ```
+
+    ```bash Frontend
+    cd frontend && npm install
+    ```
+
+    </CodeGroup>
+  </Step>
+  <Step title="Compile the contracts">
+    ```bash
+    npm run compile
+    ```
+
+    This invokes solc 0.8.27 with `viaIR: true`, `evmVersion: cancun`, and 200 optimizer runs. The confidential AMM contains dense FHE arithmetic circuits, so IR compilation is required to avoid stack depth limits while retaining optimizer output.
+  </Step>
+  <Step title="Run the test suite">
+    ```bash
+    npm test
+    ```
+
+    This runs 21 tests in fhEVM mock mode across the `MorphexToken`, `ConfidentialPair`, and `RelayerVault` suites.
+  </Step>
+  <Step title="Start a local Hardhat node">
+    In one terminal:
+
+    ```bash
+    npx hardhat node
+    ```
+  </Step>
+  <Step title="Deploy locally">
+    In another terminal, run the relayer local deploy script. This sets `DEPLOY_MOCK_TOKENS=1`, deploys `MockERC20` tokens, the `RelayerVault`, `MorphexToken` wrappers, the `ConfidentialPairFactory`, seeds a pair with 100,000 units of liquidity, and writes `frontend/.env.local` plus `frontend/.env.relayer.local`.
+
+    ```bash
+    npm run deploy:relayer-local
+    ```
+  </Step>
+  <Step title="Seed a wallet">
+    Replace `0xYourWalletAddress` with the address you want to fund.
+
+    ```bash
+    LOCAL_USER=0xYourWalletAddress npm run faucet:local
+    ```
+  </Step>
+  <Step title="Run the frontend">
+    ```bash
+    cd frontend
+    npm run dev
+    ```
+
+    Then open [http://localhost:3000](http://localhost:3000) in your browser.
+  </Step>
+</Steps>
+
+<Note>
+  Local Hardhat runs in fhEVM mock mode. Real confidential UX flows (encrypted swap, decryption) require Sepolia, which uses the live Zama relayer and KMS.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment" icon="server" href="/deployment/environment">
+    Configure environment variables and deploy to Sepolia with real FHE.
+  </Card>
+
+  <Card title="Core Concepts" icon="book-open" href="/concepts/fhevm-execution-model">
+    Learn how fhEVM execution, encrypted types, and ACL permissions work.
+  </Card>
+
+  <Card title="Confidential Pair" icon="code" href="/reference/confidential-pair">
+    Dive into the constant product AMM contract reference.
+  </Card>
+</CardGroup>

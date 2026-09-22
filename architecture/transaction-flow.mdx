@@ -1,0 +1,68 @@
+---
+title: "transaction-flow"
+sidebarTitle: "Transaction Flow"
+description: "Trace a swapExactInput through Morphex from frontend encryption to on-chain FHE validation and local receipt decryption."
+---
+
+A confidential swap in Morphex keeps every amount encrypted from the moment you create the transaction to the moment you decrypt the result locally. This page traces `swapExactInput` step by step so you understand what happens in the browser, on-chain, and inside the fhEVM coprocessor.
+
+<Steps>
+  <Step title="Frontend encrypts inputs">
+    Before submitting a swap, your wallet encrypts the input amount and the output target against the pair address. This binds the ciphertext to `(pairAddress, userAddress)` so only that pair can use it.
+
+    ```typescript
+    const encryptedInput = await fhevm.createEncryptedInput(pairAddress, address).add64(amountIn).encrypt();
+    const encryptedOutput = await fhevm.createEncryptedInput(pairAddress, address).add64(amountOutTarget).encrypt();
+    ```
+
+    Each call returns a handle and an `inputProof`. The handle is the on-chain ciphertext reference, and the `inputProof` is the zero-knowledge proof that the value was encrypted correctly. This is the exact pattern used in `frontend/src/morphex.ts`.
+  </Step>
+  <Step title="Wallet authorizes the pair as ERC-7984 operator">
+    The pair needs permission to pull your confidential tokens. You grant it operator status with an expiry timestamp.
+
+    ```typescript
+    await inputToken.setOperator(pairAddress, Math.floor(Date.now() / 1000) + 3600);
+    ```
+
+    Without this step, `confidentialTransferFrom` will revert when the pair tries to move your tokens. ERC-7984's operator authorization replaces the custom encrypted-handle transfer patterns you may have seen in earlier fhEVM examples.
+  </Step>
+  <Step title="Submit swap on-chain">
+    You call `swapExactInput` with the encrypted handles and proofs.
+
+    ```typescript
+    pair.swapExactInput(
+      direction,
+      encryptedInput.handles[0],
+      encryptedOutput.handles[0],
+      encryptedInput.inputProof,
+      encryptedOutput.inputProof,
+    );
+    ```
+
+    Inside the contract, the pair calls `FHE.fromExternal` to lift each encrypted input into an on-chain ciphertext. It then calls `_pull`, which uses `confidentialTransferFrom` with a transient ACL grant (`FHE.allowTransient`) to move tokens into the pool.
+  </Step>
+  <Step title="Coprocessor evaluates the FHE circuit">
+    The fhEVM coprocessor queues the FHE operations as a circuit. The pair checks the invariant with `_preservesInvariant`, which uses `FHE.and`, `FHE.select`, encrypted multiplication, and comparison operations. All of this happens off-chain inside the coprocessor; the verified result is posted back on-chain.
+  </Step>
+  <Step title="Reserves and receipts update">
+    If the invariant holds, the pair updates its encrypted reserves and pushes the output tokens to you. Whether the swap succeeds or fails, it stores a `SwapReceipt` with encrypted `amountIn`, `amountOut`, and `success` values. The contract applies ACL grants with `FHE.allowThis` and `FHE.allow(handle, msg.sender)` so you, and only you, can later decrypt your own receipt.
+  </Step>
+  <Step title="Frontend decrypts the receipt">
+    After the transaction is mined, your wallet reads the receipt handles from `pair.lastSwapOf(address)`.
+
+    ```typescript
+    const [amountIn, amountOut, success] = await pair.lastSwapOf(address);
+    // amountIn, amountOut, success are ciphertext handles
+    ```
+
+    You then call `fhevm.userDecrypt(...)` against the KMS gateway using your EIP-712 signed decryption session. The KMS performs threshold decryption and returns the plaintext only because the on-chain ACL and your signature both authorize it.
+  </Step>
+</Steps>
+
+<Note>
+  KMS threshold decryption plus ACL enforcement means the KMS never learns individual plaintexts unless both the on-chain ACL and your EIP-712 signature allow it.
+</Note>
+
+## Where invalid checks go
+
+Every check inside the pair that depends on an encrypted value uses `FHE.select` instead of `require`. If your output target is stale or too aggressive, the pair produces an encrypted no-op with a full refund and stores `success = false` in your receipt. See [FHE Select vs Require](/concepts/fhe-select-vs-require) and [No Encrypted Division](/concepts/no-encrypted-division) for the full pattern.

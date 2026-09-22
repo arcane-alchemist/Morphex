@@ -1,0 +1,236 @@
+---
+title: "ConfidentialPair: The Encrypted Constant-Product AMM"
+sidebarTitle: "ConfidentialPair"
+description: "Reference for ConfidentialPair, Morphex's constant-product AMM with encrypted reserves, LP shares, swap validation, and refund receipts."
+---
+
+`ConfidentialPair` is the core AMM contract. Reserves, LP shares, swap inputs, outputs, and receipts are all encrypted. Because fhEVM 0.11.1 exposes encrypted division only by a public scalar, the pair validates user-supplied encrypted targets against the constant-product invariant instead of computing outputs on-chain.
+
+## Overview
+
+```solidity
+import {FHE, ebool, euint64, euint128, externalEuint64} from "@fhevm/solidity/lib/FHE.sol";
+import {ZamaEthereumConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
+import {IERC7984} from "@openzeppelin/confidential-contracts/interfaces/IERC7984.sol";
+
+/// @title ConfidentialPair
+/// @notice A constant-product AMM with encrypted reserves, LP positions, inputs,
+///         outputs, and execution receipts.
+/// @dev fhEVM currently exposes encrypted division only by a public scalar. This
+///      pair verifies encrypted quotes and LP targets with equivalent
+///      multiplication inequalities. The UI/quote component submits targets
+///      encrypted; no on-chain amount is ever decrypted.
+contract ConfidentialPair is ZamaEthereumConfig { ... }
+```
+
+## Constants
+
+```solidity
+uint16 public constant FEE_BPS = 30;
+uint16 private constant BPS = 10_000;
+uint64 private constant MINIMUM_LIQUIDITY = 1_000;
+// Keeps fee-adjusted invariant products below 2^128, the widest fhEVM
+// multiplication result available in the installed library.
+uint64 public constant MAX_RESERVE = 1_000_000_000_000_000;
+```
+
+- `FEE_BPS = 30`: 0.30% fee on every swap.
+- `BPS = 10_000`: Basis-point denominator.
+- `MINIMUM_LIQUIDITY = 1_000`: LP shares permanently locked on the very first deposit.
+- `MAX_RESERVE = 1e15`: Per-reserve cap that keeps all `euint128` invariant products below `2^128`.
+
+## Constructor
+
+```solidity
+constructor(address token0_, address token1_) {
+    require(token0_ != address(0) && token1_ != address(0), "Morphex: zero token");
+    require(token0_ < token1_, "Morphex: unordered pair");
+    token0 = IERC7984(token0_);
+    token1 = IERC7984(token1_);
+}
+```
+
+Sorts the two ERC-7984 tokens so `token0 < token1`. This canonical ordering is enforced by `ConfidentialPairFactory` as well, so every logical pair has a single on-chain instance regardless of argument order.
+
+## State
+
+```solidity
+IERC7984 public immutable token0;
+IERC7984 public immutable token1;
+
+euint64 private _reserve0;
+euint64 private _reserve1;
+euint64 private _totalShares;
+mapping(address => euint64) private _shares;
+
+struct SwapReceipt {
+    euint64 amountIn;
+    euint64 amountOut;
+    ebool success;
+}
+
+struct LiquidityReceipt {
+    euint64 amount0;
+    euint64 amount1;
+    euint64 shares;
+    ebool success;
+}
+
+mapping(address => SwapReceipt) private _lastSwap;
+mapping(address => LiquidityReceipt) private _lastLiquidity;
+bool private _locked;
+```
+
+`_lastSwap` and `_lastLiquidity` are the encrypted receipts every caller decrypts to learn the outcome of their own transaction.
+
+## Reentrancy guard
+
+```solidity
+modifier nonReentrant() {
+    require(!_locked, "Morphex: reentrant call");
+    _locked = true;
+    _;
+    _locked = false;
+}
+```
+
+Applied to every state-mutating external function.
+
+## View functions
+
+```solidity
+function encryptedReserves() external view returns (euint64 reserve0, euint64 reserve1);
+function encryptedTotalShares() external view returns (euint64);
+function lpBalanceOf(address provider) external view returns (euint64);
+
+function lastSwapOf(address account) external view
+    returns (euint64 amountIn, euint64 amountOut, ebool success);
+
+function lastLiquidityOf(address account) external view
+    returns (euint64 amount0, euint64 amount1, euint64 shares, ebool success);
+```
+
+All returned handles are encrypted. The caller must have ACL permission on a handle to decrypt it. `_allowPoolState` grants the caller permission on their own LP balance after every operation.
+
+## addLiquidity
+
+```solidity
+/// @notice Deposits confidential amounts and mints an encrypted LP-share target.
+/// @dev The caller makes the pair a time-limited ERC-7984 operator first.
+function addLiquidity(
+    externalEuint64 encryptedAmount0,
+    externalEuint64 encryptedAmount1,
+    externalEuint64 encryptedShareTarget,
+    bytes calldata amount0Proof,
+    bytes calldata amount1Proof,
+    bytes calldata shareProof
+) external nonReentrant returns (euint64 mintedShares);
+```
+
+The caller must first authorize the pair as an ERC-7984 operator on both tokens (see [Operator authorization](/reference/confidential-pair#operator-authorization) below).
+
+The function:
+
+1. Lifts all three external ciphertexts with `FHE.fromExternal`.
+2. Pulls `pulled0`/`pulled1` from the caller via `token.confidentialTransferFrom` (bounded by encrypted balance and allowance).
+3. Selects between initial and proportional liquidity checks based on `_totalShares == 0`.
+4. Adds `MAX_RESERVE` cap checks so neither reserve overflows the invariant window.
+5. Refunds any unaccepted input via `FHE.sub(pulled, accepted)`.
+6. Locks `MINIMUM_LIQUIDITY` shares on the first successful deposit.
+7. Stores an encrypted `LiquidityReceipt` for the caller.
+
+Emits `LiquidityAdded(msg.sender)`.
+
+## removeLiquidity
+
+```solidity
+/// @notice Burns encrypted LP shares for encrypted caller-selected outputs.
+/// @dev Outputs can be below the proportional maximum (a donation), but never above it.
+function removeLiquidity(
+    externalEuint64 encryptedShares,
+    externalEuint64 encryptedAmount0,
+    externalEuint64 encryptedAmount1,
+    bytes calldata sharesProof,
+    bytes calldata amount0Proof,
+    bytes calldata amount1Proof
+) external nonReentrant returns (euint64 amount0, euint64 amount1);
+```
+
+Validates that:
+
+- The requested share amount is at most the caller's balance.
+- Each requested output is at most the corresponding reserve.
+- The requested outputs are at most proportional to the burned shares.
+
+The last check uses `_isAtMostProportional`, which allows outputs below the fair share (a donation to the pool) but never above. Emits `LiquidityRemoved(msg.sender)`.
+
+## swapExactInput
+
+```solidity
+/// @notice Swaps an encrypted exact input for an encrypted output target.
+/// @dev A bad or stale target produces an encrypted no-op/refund.
+function swapExactInput(
+    bool zeroForOne,
+    externalEuint64 encryptedAmountIn,
+    externalEuint64 encryptedAmountOut,
+    bytes calldata amountInProof,
+    bytes calldata amountOutProof
+) external nonReentrant returns (euint64 amountOut);
+```
+
+<ParamField path="zeroForOne" type="bool">
+  Trade direction: `true` swaps `token0` in for `token1` out, `false` swaps `token1` in for `token0` out.
+</ParamField>
+
+<ParamField path="encryptedAmountIn" type="externalEuint64">
+  Encrypted exact input the trader will pay.
+</ParamField>
+
+<ParamField path="encryptedAmountOut" type="externalEuint64">
+  Encrypted output target computed off-chain against the current reserves.
+</ParamField>
+
+Enforced checks:
+
+- `pulledIn > 0`
+- `reserveIn + pulledIn <= MAX_RESERVE`
+- `reserveIn > 0`
+- `_preservesInvariant(pulledIn, requestedOut, reserveIn, reserveOut)`
+
+The invariant check is a multiplication-only rearrangement of the fee-adjusted constant product (see [No Encrypted Division](/concepts/no-encrypted-division)).
+
+On a failed validation the trader is refunded the full `pulledIn` amount and receives a `SwapReceipt` with `success = false`. Emits `Swap(msg.sender, zeroForOne)`.
+
+## Operator authorization
+
+Because Morphex uses standard ERC-7984 tokens rather than custom handle transfers, the pair must be authorized as an operator on both tokens before it can pull funds. Authorization is time-limited:
+
+```solidity
+await token0.setOperator(pair.address, expiryTimestamp);
+await token1.setOperator(pair.address, expiryTimestamp);
+```
+
+After the expiry passes, the pair loses the ability to pull tokens from the user until the user re-authorizes it. This is enforced entirely by the underlying ERC-7984 contracts.
+
+## Internal validators
+
+- `_isInitialLiquidity(a0, a1, shareTarget)`: verifies `shareTarget^2 <= a0 * a1 < (shareTarget + 1)^2` and `shareTarget > MINIMUM_LIQUIDITY`.
+- `_isProportionalLiquidity(a0, a1, shares)`: verifies `a0 * totalShares == shares * reserve0` and `a1 * totalShares == shares * reserve1`.
+- `_isAtMostProportional(shares, a0, a1)`: verifies `a0 * totalShares <= shares * reserve0` and `a1 * totalShares <= shares * reserve1`.
+- `_preservesInvariant(amountIn, amountOut, reserveIn, reserveOut)`: verifies the fee-adjusted constant-product inequality using only `FHE.mul`, `FHE.add`, and `FHE.ge`.
+
+All validators return `ebool`, and the caller uses `FHE.select` to gate accepted vs. refunded amounts. There are no reverts on invalid inputs; every rejected transaction produces an encrypted receipt with `success = false` and refunds the full input.
+
+## Events
+
+```solidity
+event LiquidityAdded(address indexed provider);
+event LiquidityRemoved(address indexed provider);
+event Swap(address indexed trader, bool indexed zeroForOne);
+```
+
+Events carry no amounts and no success flag. The only public signals are that an interaction happened and the trade direction. All plaintext outcomes must be recovered by decrypting the caller's receipt.
+
+<Note>
+  ConfidentialPair is unaudited and intended for testnet use only.
+</Note>

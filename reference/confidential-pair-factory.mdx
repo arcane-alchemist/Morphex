@@ -1,0 +1,92 @@
+---
+title: "ConfidentialPairFactory: Canonical Pair Registry"
+sidebarTitle: "PairFactory"
+description: "Reference for ConfidentialPairFactory, the registry and deployer that guarantees a single canonical ConfidentialPair per token pair."
+---
+
+`ConfidentialPairFactory` deploys and tracks `ConfidentialPair` contracts. It enforces canonical token ordering so every logical pair maps to exactly one on-chain contract regardless of argument order.
+
+## Overview
+
+```solidity
+import {ConfidentialPair} from "./ConfidentialPair.sol";
+
+/// @title ConfidentialPairFactory
+/// @notice Registry and deployer for canonical confidential token pairs.
+contract ConfidentialPairFactory { ... }
+```
+
+The factory has no constructor and no owner or admin role. Anyone can call `createPair` to deploy a new pair.
+
+## State
+
+```solidity
+mapping(address => mapping(address => address)) public getPair;
+address[] public allPairs;
+```
+
+- `getPair[tokenA][tokenB]` returns the pair address for any token ordering, since the factory writes both `[token0][token1]` and `[token1][token0]` on creation.
+- `allPairs` is a chronological list of every pair ever created.
+
+## Events
+
+```solidity
+event PairCreated(address indexed token0, address indexed token1, address pair, uint256 pairCount);
+```
+
+`token0` and `token1` are always in canonical sorted order (`token0 < token1`). `pairCount` is `allPairs.length` after the new pair is pushed.
+
+## Functions
+
+### allPairsLength
+
+```solidity
+function allPairsLength() external view returns (uint256);
+```
+
+Returns the total number of pairs ever deployed. Useful for iterating `allPairs` from off-chain tooling.
+
+### createPair
+
+```solidity
+function createPair(address tokenA, address tokenB) external returns (address pair);
+```
+
+Deploys a new `ConfidentialPair` for the given tokens.
+
+<ParamField path="tokenA" type="address">
+  First token address. Order does not matter.
+</ParamField>
+
+<ParamField path="tokenB" type="address">
+  Second token address. Order does not matter.
+</ParamField>
+
+Enforces:
+
+- `tokenA != tokenB` (`"Morphex: identical tokens"`)
+- Neither address is zero (`"Morphex: zero token"`)
+- No pair already exists for the sorted pair (`"Morphex: pair exists"`)
+
+Sorts the tokens so `token0 < token1`, deploys `new ConfidentialPair(token0, token1)`, records both direction lookups in `getPair`, pushes to `allPairs`, and emits `PairCreated(token0, token1, pair, pairCount)`.
+
+## Usage
+
+```solidity
+// Anywhere in a script or another contract.
+address pair = factory.createPair(cUSDT, cUSDC);
+
+// Later lookups work in either order.
+address samePair = factory.getPair(cUSDT, cUSDC);
+address alsoSame = factory.getPair(cUSDC, cUSDT);
+
+// Iterate every deployed pair.
+uint256 count = factory.allPairsLength();
+for (uint256 i = 0; i < count; ++i) {
+    address p = factory.allPairs(i);
+}
+```
+
+<Note>
+  ConfidentialPairFactory is unaudited and intended for testnet use only. There is no mechanism to remove or replace an existing pair.
+</Note>

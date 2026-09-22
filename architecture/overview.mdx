@@ -1,0 +1,82 @@
+---
+title: "overview"
+sidebarTitle: "Overview"
+description: "Morphex is a confidential AMM built on Zama fhEVM with encrypted reserves, LP shares, and swap receipts. Learn how its frontend, contracts, and relayer work together."
+---
+
+Morphex is a constant-product automated market maker that keeps every protocol amount encrypted end to end. Token balances, pool reserves, LP shares, and swap outputs are all ciphertext on-chain. No amount is ever decrypted inside a smart contract. This page introduces the major components of the system, how data flows through a swap, and what information remains public versus private.
+
+## Components
+
+Morphex has four layers that work together to give users a confidential trading experience.
+
+### Frontend
+
+The frontend is a Vite 6 + React 19 + TypeScript application. It uses `@zama-fhe/relayer-sdk` to encrypt inputs locally in the browser before submitting them on-chain. After a transaction completes, the frontend decrypts handles from swap and liquidity receipts using the Zama KMS gateway. All encryption and decryption happens in the wallet. The frontend never sees plaintext amounts unless the user authorizes decryption.
+
+### Host chain contracts
+
+The protocol ships with five contracts:
+
+| Contract | Purpose |
+| --- | --- |
+| `MorphexToken` | ERC-7984 confidential token with relayer mint and burn bridge |
+| `ConfidentialPair` | Encrypted constant-product AMM with reserves, LP accounting, and refund receipts |
+| `ConfidentialPairFactory` | Canonical pair creation (one pair per token combination) |
+| `RelayerVault` | Public ERC-20 custody with withdrawal requests, batch payouts, and a time-locked escape hatch |
+| `MockERC20` | Test token for local development only |
+
+### Zama fhEVM
+
+The fhEVM coprocessor evaluates FHE circuits off-chain and returns verified results on-chain. The Zama KMS provides threshold decryption, and the on-chain ACL controls which addresses may read each ciphertext. Morphex wires these together via `ZamaEthereumConfig`.
+
+### Off-chain relayer service
+
+The relayer watches `Deposited` and `BurnRequested` events, mints confidential tokens after public deposits, and batches payouts for withdrawals. Users trust the relayer for liveness and honesty, but a time-locked escape hatch provides a trustless fallback if the relayer stalls.
+
+## Data flow
+
+A typical swap moves through the system like this:
+
+```text
+wallet (encrypts amount + target) → ERC-7984 token → ConfidentialPair
+                                                    → FHE invariant checks
+                                                    → encrypted receipt for wallet
+```
+
+The wallet encrypts `amountIn` and `amountOutTarget` against the pair address, authorizes the pair as an ERC-7984 operator, and submits the swap. The pair lifts the encrypted inputs via `FHE.fromExternal`, pulls tokens with `confidentialTransferFrom`, evaluates the invariant in FHE, updates encrypted reserves, and stores an encrypted receipt. The wallet later decrypts that receipt locally through the KMS.
+
+## Privacy boundary
+
+FHE encrypts values, not Ethereum itself. The following items are encrypted on-chain:
+
+- Token amounts (balances, transfers, mints, burns)
+- Pool reserves
+- LP share quantities
+- Swap and liquidity receipt values
+
+The following remain public:
+
+- Wallet and contract addresses
+- Transaction timing and ordering
+- Gas usage
+- Function selector being called
+- Event topics (events carry no amounts)
+
+<CardGroup cols={2}>
+  <Card title="Transaction Flow" icon="layers" href="/architecture/transaction-flow">
+    Step-by-step walkthrough of a confidential swap from encryption to decryption.
+  </Card>
+
+  <Card title="Relayer Bridge" icon="code" href="/architecture/relayer-bridge">
+    How public ERC-20 tokens are wrapped into confidential tokens and back.
+  </Card>
+
+  <Card title="fhEVM Execution Model" icon="book-open" href="/concepts/fhevm-execution-model">
+    How the coprocessor, KMS, and ACL work together to keep values private.
+  </Card>
+
+  <Card title="ConfidentialPair" icon="file" href="/reference/confidential-pair">
+    Reference for the AMM contract, its constants, and its core functions.
+  </Card>
+</CardGroup>

@@ -1,0 +1,34 @@
+---
+title: "MockERC20: Local Test Token Helper"
+sidebarTitle: "MockERC20"
+description: "Reference for MockERC20, a minimal owner-mintable ERC-20 used only for local Hardhat and Sepolia testing of the vault and bridge."
+---
+
+`MockERC20` is a small helper token used in tests and testnet deployments to stand in for real stablecoins (USDT, USDC) when a genuine on-chain token is not available. It is not part of the confidential protocol and should never be used in production.
+
+## Overview
+
+```solidity
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+contract MockERC20 is ERC20, Ownable {
+    uint8 private immutable _decimals;
+
+    constructor(string memory name_, string memory symbol_, uint8 decimals_)
+        ERC20(name_, symbol_) Ownable(msg.sender);
+
+    function decimals() public view virtual override returns (uint8);
+    function mint(address to, uint256 amount) external onlyOwner;
+}
+```
+
+The constructor sets the deployer as the owner. Decimals are stored in an immutable and returned by the `decimals()` override so the token can mimic 6-decimal stablecoins.
+
+## When it is used
+
+- **Local Hardhat**: `scripts/deploy-relayer-pair.ts` deploys `MockERC20` instances for `USDC` and `USDT` when no real addresses are provided so `RelayerVault.deposit` has something to pull.
+- **Sepolia**: The same script deploys mocks when `DEPLOY_MOCK_TOKENS=1` or when a symbol is listed in `MOCK_SYMBOLS`, so testnet users can mint themselves test balances via `scripts/mint-testnet.ts`.
+- **Tests**: Used by the Hardhat test suite to seed vault deposits.
+
+Do not use `MockERC20` in production. It has no supply cap, no access control beyond a single owner, and its only mint path (`mint(address, uint256)`) exists exclusively for testing.

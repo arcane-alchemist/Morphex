@@ -1,0 +1,71 @@
+---
+title: "relayer-bridge"
+sidebarTitle: "Relayer Bridge"
+description: "Wrap public ERC-20 tokens into Morphex confidential tokens and unwrap them back through the RelayerVault, with a time-locked escape hatch for trustless recovery."
+---
+
+Morphex uses `RelayerVault` as a bridge between public ERC-20 stablecoins and confidential ERC-7984 tokens. You deposit public tokens into the vault, and an off-chain relayer mints confidential tokens to your wallet. To unwrap, you burn your confidential balance and request a public payout. If the relayer stalls, a time-locked escape hatch lets you claim your funds directly without trusting the relayer.
+
+## Wrap flow
+
+```text
+Public ERC-20 → RelayerVault deposit → relayerMint → cToken (encrypted)
+```
+
+1. You call `RelayerVault.deposit(token, amount)` to move public ERC-20 into the vault.
+2. The relayer detects the `Deposited` event, confirms the deposit in its internal ledger, and calls `MorphexToken.relayerMint(to, encryptedAmount, inputProof)`.
+3. `relayerMint` is protected by `RELAYER_ROLE`. It lifts the encrypted amount with `FHE.fromExternal` and mints an encrypted balance to your wallet.
+
+The minted amount is encrypted on-chain. Only you can decrypt your own confidential balance.
+
+## Unwrap flow
+
+```text
+cToken → relayerBurnRequest → RelayerVault → batchWithdraw → public ERC-20
+                             └→ escape hatch after delay (trustless fallback)
+```
+
+1. You call `MorphexToken.relayerBurnRequest(encryptedAmount, inputProof, publicAmount)`.
+2. The contract burns your encrypted balance and calls `RelayerVault.registerWithdrawalRequest` to record your intent as a public tuple `(user, recipient, token, amount, requestedAt)`.
+3. The relayer later batches payouts with `batchWithdraw`, paying public ERC-20 from the vault back to you.
+
+If the relayer does not process your request in time, you can call `claimEscapedWithdrawal(requestId)` after `ESCAPE_HATCH_DELAY` has passed. This is a trustless fallback that pays you directly from the vault.
+
+For payouts to a different address than the burner, use `relayerBurnRequestTo(recipient, ...)`, which routes through `RelayerVault.registerWithdrawalRequestTo`.
+
+## Trust model
+
+The relayer is trusted for liveness and honesty. It must:
+
+- Mint confidential tokens promptly after public deposits.
+- Batch and pay out withdrawals correctly.
+- Maintain an internal ledger that reconciles vault balances against confidential supply.
+
+`batchWithdraw` enforces that every payout matches the registered `(recipient, token, amount)` tuple. The relayer cannot redirect funds to a different address or token. If the relayer goes offline or misbehaves, the escape hatch gives users a direct, time-locked path to recover their public tokens.
+
+## Relayer service specification
+
+The in-repo specification at `docs/relayer-service-spec.md` defines the off-chain service requirements in detail, including:
+
+- Ledger schema for deposits, mints, withdrawal requests, and batch payouts
+- Netting and batching policy (hourly batches, minimum payout thresholds, recipient shuffling)
+- Monitoring requirements and alert conditions
+- Key management requirements (multisig or threshold-signing)
+- Explicit non-goals (this is not a trustless or cryptographically unlinkable design)
+
+See [Relayer Service Specification](/reference/relayer-service-spec) for the full text.
+
+## Contract references
+
+| Function | Contract | Role |
+| --- | --- | --- |
+| `deposit(address token, uint256 amount)` | `RelayerVault` | Move public ERC-20 into the vault |
+| `relayerMint(address to, externalEuint64 encryptedAmount, bytes inputProof)` | `MorphexToken` | Mint confidential tokens (relayer only) |
+| `relayerBurnRequest(externalEuint64 encryptedAmount, bytes inputProof, uint256 publicAmount)` | `MorphexToken` | Burn cToken and register a withdrawal request |
+| `relayerBurnRequestTo(address recipient, externalEuint64 encryptedAmount, bytes inputProof, uint256 publicAmount)` | `MorphexToken` | Same, with a different payout recipient |
+| `batchWithdraw(Payout[] payouts, uint256[] requestIds)` | `RelayerVault` | Relayer pays out a batch of withdrawals |
+| `claimEscapedWithdrawal(uint256 requestId)` | `RelayerVault` | User claims funds directly after the delay |
+
+<Note>
+  The relayer design is custodial and semi-trusted. A production deployment should use a multisig-controlled relayer signer, hourly batching with reconciliation, and monitoring for vault solvency and pending escape-hatch deadlines.
+</Note>

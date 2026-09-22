@@ -1,0 +1,66 @@
+---
+title: "index"
+sidebarTitle: "Introduction"
+description: "Morphex is a confidential constant-product AMM built on Zama fhEVM and OpenZeppelin ERC-7984 where every amount stays encrypted end-to-end."
+---
+
+Morphex is a confidential constant-product AMM where token balances, reserves, LP shares, swap amounts, and receipts stay encrypted end to end via Zama fhEVM and OpenZeppelin ERC-7984. No amount is ever decrypted on chain. The protocol validates trades and liquidity operations using fully homomorphic encryption so that MEV bots cannot read order flow, snipe liquidity additions, or sandwich visible slippage tolerances.
+
+## Why confidentiality matters for DeFi
+
+Public DEX order flow leaks strategy. MEV bots front run large swaps, sniper bots race liquidity adds, and sandwich attacks target visible slippage tolerances. Swap amounts hidden inside the AMM invariant check remove the primary signal MEV searchers use. Wallet to wallet transfers also reveal balance and history to any observer.
+
+Addresses, timing, gas usage, and the fact that a function was called remain public. Events contain no amounts. See the [Privacy Boundary](#privacy-boundary) section below for the exact leakage model.
+
+## fhEVM at a glance
+
+- **Host chain**: Ethereum (Sepolia today). Contracts hold encrypted handles (ciphertexts), not plaintext.
+- **Coprocessor**: Off chain nodes execute FHE circuits and post proofs back to the host.
+- **KMS (Key Management System)**: Threshold decryption network that gates who can decrypt what.
+- **ACL (Access Control List)**: On chain permissions saying which addresses (users or contracts) may operate on or decrypt a given ciphertext.
+
+Morphex uses these primitives so the pair contract can validate a constant product invariant on encrypted reserves without ever seeing a plaintext value.
+
+## What is built
+
+| Contract | Purpose | Lines |
+| --- | --- | --: |
+| `MorphexToken` | ERC-7984 confidential token with relayer mint/burn bridge | 127 |
+| `ConfidentialPair` | Encrypted constant product AMM: reserves, LP accounting, swap validation, refund receipts | 292 |
+| `ConfidentialPairFactory` | Canonical pair creation (one pair per token combination) | 30 |
+| `RelayerVault` | Public ERC-20 custody with withdrawal requests, batch payouts, and time locked escape hatch | 210 |
+| `MockERC20` | Test token for local development | 21 |
+
+**5 contracts, 680 lines of Solidity, 3 test suites, 21 tests passing** in fhEVM mock mode.
+
+## Privacy boundary
+
+FHE encrypts values, not Ethereum itself. These remain public:
+
+- Wallet and contract addresses
+- Pair identity
+- Transaction timing and order
+- Gas usage
+- The fact that a liquidity or swap function was called
+
+Events deliberately contain no amounts. Balances, reserves, LP shares, and swap inputs/outputs are encrypted.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run Morphex locally in minutes: clone, compile, deploy, and open the frontend.
+  </Card>
+
+  <Card title="Architecture" icon="layers" href="/architecture/overview">
+    Learn how the relayer bridge, pair contract, and FHE coprocessor fit together.
+  </Card>
+
+  <Card title="Core Concepts" icon="book-open" href="/concepts/fhevm-execution-model">
+    Understand encrypted types, ACL permissions, and the FHE execution model.
+  </Card>
+
+  <Card title="Confidential Pair" icon="code" href="/reference/confidential-pair">
+    Read the Solidity reference for the constant product AMM contract.
+  </Card>
+</CardGroup>

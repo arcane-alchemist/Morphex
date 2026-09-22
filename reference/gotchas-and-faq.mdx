@@ -1,0 +1,53 @@
+---
+title: "FHE Gotchas and Frequently Asked Questions"
+sidebarTitle: "Gotchas & FAQ"
+description: "Common pitfalls when building with fhEVM on Morphex: gas costs, encrypted debugging, revert leakage, missing division, and security FAQs."
+---
+
+Building on fhEVM introduces constraints that do not exist in plaintext EVM development. This page covers the most common gotchas you will encounter when writing or interacting with Morphex contracts, plus answers to frequently asked security and privacy questions.
+
+## Gas costs vs plaintext
+
+Encrypted arithmetic is orders of magnitude more expensive than plaintext operations. A single `FHE.mul(euint128, euint128)` far exceeds the cost of a plaintext multiply. That is why `MAX_RESERVE` is capped at `1e15` base units: fee-adjusted products must fit inside 128-bit encrypted multiplication. It is also why Morphex uses cross-multiplication instead of division. Fewer FHE operations per transaction means cheaper gas.
+
+## Why you cannot console.log an encrypted value
+
+Ciphertexts are opaque handles. The plaintext exists only inside the KMS threshold decryption network. Contracts do not hold the decryption key, so `console.log` prints the handle, not the value. If you need to inspect an encrypted value during testing, use the test helpers described in the next section.
+
+## The debug decrypt behind a flag pattern
+
+On testnets, you can expose a helper decrypt behind a `debug: true` flag gated by an admin or owner. In tests, use the helpers from `test/helpers.ts` such as `fhevm.userDecryptEuint` or `fhevm.decrypt64`. Never ship debug decrypts to mainnet.
+
+## Why a revert leaks information
+
+When `require()` reverts based on a check involving an encrypted value, the revert itself is a public signal that the check failed. That leaks one bit about the plaintext. Morphex uses `FHE.select(condition, value, 0)` and stores an encrypted `success` receipt instead of reverting. For more details, see [FHE Select vs Require](/concepts/fhe-select-vs-require).
+
+## Why encrypted division is missing
+
+fhEVM currently exposes encrypted division only by a public scalar, not ciphertext divided by ciphertext. Encrypted square root and other transcendentals are similarly unavailable at usable circuit depth. Morphex converts ratio checks to multiplication inequalities so the AMM invariant can still be validated without encrypted division. For the design rationale, see [No Encrypted Division](/concepts/no-encrypted-division).
+
+## FAQ
+
+<Accordion title="Can the relayer steal my funds?">
+  No. The relayer cannot redirect amounts because `batchWithdraw` requires the recipient, token, and amount to match the stored request. A time-locked escape hatch (default 24 hours) lets users self-withdraw even if the relayer goes offline.
+</Accordion>
+
+<Accordion title="What is leaked publicly?">
+  Wallet addresses, contract addresses, transaction timing, gas usage, the function signature that was called, and event topics are all public. Amounts, balances, reserves, and LP shares remain encrypted.
+</Accordion>
+
+<Accordion title="Why cap reserves at 1e15?">
+  The fee-adjusted invariant product must fit inside the 128-bit encrypted multiplication range. Capping reserves at `1e15` base units guarantees the product does not overflow during FHE arithmetic.
+</Accordion>
+
+<Accordion title="Is Morphex audited?">
+  No. Morphex is a working baseline, not an audited production deployment. Do not use it with mainnet funds. A production quote service, integration tests on a public testnet, and an independent audit are required before mainnet use.
+</Accordion>
+
+<Accordion title="Which networks are supported?">
+  Sepolia for real FHE operations with the live Zama relayer and KMS. Hardhat local (chain ID 31337) for mock testing without a coprocessor.
+</Accordion>
+
+<Note>
+  Morphex is a working protocol baseline, not an audited production deployment. Do not use it with mainnet funds.
+</Note>
